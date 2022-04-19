@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">VideoApp</string>
+    <string name="app_video_dir">Movies/VideoApp-Videos</string>
+    <string name="start_capture">Start Video</string>
+    <string name="stop_capture">Stop Video</string>
+    <string name="hash">#</string>
+</resources>
