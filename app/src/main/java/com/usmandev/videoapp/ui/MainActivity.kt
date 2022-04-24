@@ -3,6 +3,7 @@ package com.usmandev.videoapp.ui
 import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
@@ -14,18 +15,26 @@ import androidx.camera.video.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
+import androidx.lifecycle.LiveData
+import androidx.work.*
+import com.usmandev.videoapp.R
 import com.usmandev.videoapp.databinding.ActivityMainBinding
+import com.usmandev.videoapp.utils.Constants.FILENAME_FORMAT
+import com.usmandev.videoapp.utils.logDebug
+import com.usmandev.videoapp.utils.logError
+import com.usmandev.videoapp.utils.logInfo
+import com.usmandev.videoapp.utils.showShortToast
+import com.usmandev.videoapp.worker.VideoOverlayWorker
+import com.usmandev.videoapp.worker.WorkerKeys
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import com.usmandev.videoapp.R
-import com.usmandev.videoapp.utils.Constants.FILENAME_FORMAT
-import com.usmandev.videoapp.utils.logDebug
-import com.usmandev.videoapp.utils.logError
-import com.usmandev.videoapp.utils.showShortToast
+
 
 class MainActivity : AppCompatActivity() {
+
     companion object {
         private const val TAG = "MainActivity"
         private const val REQUEST_CODE_PERMISSIONS = 10
@@ -42,6 +51,14 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var cameraExecutor: ExecutorService
 
+    private lateinit var recordingName: String
+
+    private val fFmpegCommands: ArrayList<String> = arrayListOf()
+    private lateinit var videoOverlayWorkerRequestBuilder: OneTimeWorkRequest.Builder
+    private lateinit var videoOverlayWorkerRequest: OneTimeWorkRequest
+    private lateinit var workManager: WorkManager
+    private lateinit var workInfoList: LiveData<List<WorkInfo>>
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         _binding = ActivityMainBinding.inflate(layoutInflater)
@@ -55,6 +72,12 @@ class MainActivity : AppCompatActivity() {
         handleCameraPermissionsAndStartCamera()
 
         cameraExecutor = Executors.newSingleThreadExecutor()
+        videoOverlayWorkerRequestBuilder = OneTimeWorkRequestBuilder<VideoOverlayWorker>()
+        workManager = WorkManager.getInstance(applicationContext)
+        workInfoList = workManager.getWorkInfosForUniqueWorkLiveData(WorkerKeys.VIDEO_OVERLAY_WORKER)
+        workInfoList.observe(this) { workInfoList ->
+            logInfo(workInfoList.toString(), "WORK_INFO_LIST")
+        }
     }
 
     private fun handleCameraPermissionsAndStartCamera() {
@@ -97,7 +120,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        recordingName = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val name = recordingName
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -127,6 +151,8 @@ class MainActivity : AppCompatActivity() {
                     showShortToast("Recording Started.")
                 }
                 is VideoRecordEvent.Finalize -> {
+                    applyOverLayFilterOnVideoRecorded(recordEvent.outputResults.outputUri)
+                    startOverLayFilterOnRecordedVideoWorker()
                     binding.videoCaptureButton.apply {
                         text = getString(R.string.start_capture)
                         isEnabled = true
@@ -143,6 +169,27 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun applyOverLayFilterOnVideoRecorded(outputUri: Uri) {
+        val directory = File(MediaStore.Video.Media.EXTERNAL_CONTENT_URI.path + "/" + getString(R.string.app_video_dir))
+        if (!directory.exists()) directory.mkdir()
+        val filteredVideoFile = File(directory, "FilteredFile.mp4")
+        val command =
+            "ffmpeg -i ${directory.absolutePath + "/$recordingName.mp4"} -i logo.png -filter_complex \"overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2\" -codec:a copy $filteredVideoFile"
+        fFmpegCommands.add(command)
+    }
+
+    private fun startOverLayFilterOnRecordedVideoWorker() {
+        videoOverlayWorkerRequestBuilder.setInputData(Data.Builder().apply {
+            putStringArray(WorkerKeys.FFMPEG_COMMANDS, fFmpegCommands.toTypedArray())
+        }.build())
+        videoOverlayWorkerRequest = videoOverlayWorkerRequestBuilder.build()
+        workManager.beginUniqueWork(
+            WorkerKeys.VIDEO_OVERLAY_WORKER,
+            ExistingWorkPolicy.REPLACE,
+            videoOverlayWorkerRequest
+        ).enqueue()
     }
 
     private fun allPermissionsGranted() =
